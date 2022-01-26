@@ -1,4 +1,3 @@
-from gettext import find
 from typing import Any
 import csv
 import datetime
@@ -9,6 +8,7 @@ import time
 
 from bs4 import BeautifulSoup
 from dotenv import find_dotenv, load_dotenv
+import pytz
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 import tweepy
@@ -71,16 +71,18 @@ def get_stats_table_headers(page_soup: BeautifulSoup) -> tuple[dict, list]:
     return header_vals, data_raw
 
 
-def add_pts_to_map(headers: dict, data_raw: list, point_list: list, pt_map: dict = None) -> list:
+def add_pts_to_map(headers: dict, data_raw: list, point_list: list, pt_map: dict = None) -> tuple[list, datetime.datetime]:
     pts_col = headers["PTS"]
     point_list.append(int(data_raw[pts_col]))
 
+    last_game = None
     if pt_map is not None:
         d = date_parse(data_raw[headers["Date"]])
+        last_game = datetime.datetime.strptime(data_raw[headers["Date"]], "%Y-%m-%d")
         if d not in pt_map.keys():
             pt_map[str(d)] = int(data_raw[pts_col])
 
-    return point_list
+    return point_list, last_game
 
 
 # First let's convert the date to a number
@@ -92,7 +94,7 @@ def date_parse(d: str) -> int:
     return d1.days
 
 
-def get_lebron_pts():
+def get_lebron_pts() -> tuple[bool, list, datetime.datetime]:
     """Returns true if entries are added to the lbj_pt_map"""
     lbj_pt_map = {}
 
@@ -115,6 +117,7 @@ def get_lebron_pts():
 
     start_year = 2004 if len(lbj_pt_map) == 0 else 2022
 
+    last_game = None
     for year in range(start_year, 2023):
         driver.get(lbj_site_link.format(year))
         page_soup = get_soup(driver.page_source)
@@ -122,7 +125,7 @@ def get_lebron_pts():
 
         for l in data_raw:
             try:
-                point_list = add_pts_to_map(header_vals, l, point_list, pt_map=lbj_pt_map)
+                point_list, last_game = add_pts_to_map(header_vals, l, point_list, pt_map=lbj_pt_map)
             except:
                 print(l)
 
@@ -134,7 +137,7 @@ def get_lebron_pts():
     with open("lbj.json", "w") as f:
         json.dump(lbj_pt_map, f, indent=4)
 
-    return len(lbj_pt_map) != start_size, ret
+    return len(lbj_pt_map) != start_size, ret, last_game
 
 
 def get_kareem_pts():
@@ -286,7 +289,7 @@ def get_laker_schedule(driver: webdriver.Chrome) -> None:
     return laker_schedule
 
 
-def send_tweet(tweet_str: str) -> None:
+def send_tweet(tweet_str: str, last_game: datetime.datetime) -> None:
     consumer_key = os.environ["TWITTER_CONSUMER_KEY"]
     consumer_secret = os.environ["TWITTER_CONSUMER_KEY_SECRET"]
     auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
@@ -299,19 +302,48 @@ def send_tweet(tweet_str: str) -> None:
 
     api.verify_credentials()
 
-    # Tweet / Update Status
+    if len(tweet_str) > 280:
+        print(tweet_str)
+        print("TWEET IS TOO LONG, UPDATE MANUALLY")
 
-    # The app and the corresponding credentials must have the Write perission
+    if should_send_tweet(api, last_game):
+        if len(tweet_str) < 280:
+            api.update_status(tweet_str)
+    else:
+        print("Already tweeted today")
 
-    # Check the App permissions section of the Settings tab of your app, under the
-    # Twitter Developer Portal Projects & Apps page at
-    # https://developer.twitter.com/en/portal/projects-and-apps
 
-    # Make sure to reauthorize your app / regenerate your access token and secret
-    # after setting the Write permission
+def should_send_tweet(api: tweepy.API, last_game: datetime.datetime) -> bool:
+    latest_tweet_date = datetime.datetime.utcnow() - datetime.timedelta(days=365)
+    latest_tweet_date = latest_tweet_date.replace(tzinfo=pytz.timezone('US/Eastern'))
+    for tweet in api.user_timeline():
+        created_at = tweet.created_at.replace(tzinfo=pytz.timezone('US/Eastern'))
+        if created_at > latest_tweet_date:
+            latest_tweet_date = created_at
 
-    if len(tweet_str) < 280:
-        api.update_status(tweet_str)
+    print(f"Last tweet was on {last_game.date()} and last game was on {latest_tweet_date.date()}")
+    return last_game.date() > latest_tweet_date.date()
+
+
+
+def construct_tweet(lbj: int, kareem: int, malone: int, lebron_avg: float, schedule: list) -> str:
+    tweet = ""
+    tweet = "1. {}: {}\n2. {}: {}\n"
+    if kareem > lbj:
+        if malone > lbj:
+            tweet = "1. Kareem: {}\n2. Malone: {}\n3. LeBron: {} ({} points back)\n".format(kareem, malone, lbj, malone - lbj)
+            games = math.ceil((malone - lbj) / lebron_avg)
+            game = schedule[games - 1]
+            tweet += f"LeBron needs about {games} more games to pass Malone."
+            tweet += f"\nBest guess for passing Malone is {'at' if game[2] == '@' else 'against'} {game[3]} on {game[0]} at {game[1]}"
+        else:
+            tweet = "1. Kareem: {}\n2. LeBron: {} ({} points back)\n".format(kareem, lbj, kareem - lbj)
+            games = math.ceil((kareem - lbj) / lebron_avg)
+            game = schedule[games - 1]
+            tweet += f"LeBron needs about {games} more games to pass Kareem."
+            tweet += f"\nBest guess for passing Malone is {'at' if game[2] == '@' else 'against'} {game[3]} on {game[0]} at {game[1]}"
+
+    return tweet
 
 
 if __name__ == "__main__":
@@ -321,17 +353,14 @@ if __name__ == "__main__":
 
     kareem_point_list = get_kareem_pts()
     malone_point_list = get_malone_pts()
-    lbj_played, lbj_point_list = get_lebron_pts()
+    lbj_played, lbj_point_list, last_game = get_lebron_pts()
 
     kareem_total = sum(kareem_point_list)
-    print("Kareem: ", kareem_total)
 
     malone_total = sum(malone_point_list)
-    print("Malone: ", malone_total)
 
     lbj_total = sum(lbj_point_list)
     print("LBJ: ", lbj_total)
-    print("LBJ Played: ", lbj_played)
 
     # Let's see how long it will take LBJ to catch malone and kareem given his last 25 games
 
@@ -347,29 +376,24 @@ if __name__ == "__main__":
     malone_game = None
     kareem_game = None
     if malone_total > lbj_total:
-        print("malone")
         median_game = int(sum(malone_game_count) / len(malone_game_count))
         if median_game < len(schedule):
-            print("Has a chance to beat malone this year")
             malone_game = schedule[median_game]
     elif kareem_total > lbj_total:
-        print("kareem")
-        print("malone")
         median_game = int(sum(kareem_game_count) / len(kareem_game_count))
         if median_game < len(schedule):
-            print("Has a chance to beat kareem this year")
             kareem_game = schedule[median_game]
 
-    print("Based on rolling averages of 10, 25, 100, and career point average:")
-    tweet_str = f"Games to surpass Karl Malone: {min(malone_game_count)} to {max(malone_game_count)}.\nGames to surpass Kareem Abdul-Jabaar: {min(kareem_game_count)} to {max(kareem_game_count)}."
-    if malone_game:
-        tweet_str += f"\nBest guess for passing Malone is {'at' if malone_game[2] == '@' else 'against'} {malone_game[3]} on {malone_game[0]} at {malone_game[1]}"
-    elif kareem_game:
-        tweet_str += f"\nBest guess for passing Kareem is {'at' if kareem_game[2] == '@' else 'against'} {kareem_game[3]} on {kareem_game[0]} at {kareem_game[1]}"
-    print(tweet_str)
+    tweet_str = construct_tweet(
+        lbj_total, kareem_total, malone_total, sum(lbj_point_list) / len(lbj_point_list), schedule
+    )
 
-    if lbj_played:
-        send_tweet(tweet_str)
+    if len(tweet_str) + len("\n#NBA #LeBron #GOAT") < 280:
+        tweet_str += "\n#NBA #LeBron #GOAT"
+
+    print(f"TWEET:\n{tweet_str}")
+
+    send_tweet(tweet_str, last_game)
 
     # Let's create a graph on mondays. I'm disabling this for now, I don't like the graph that much
     if datetime.datetime.today().weekday() == 7:
