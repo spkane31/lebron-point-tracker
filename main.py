@@ -322,7 +322,7 @@ def should_send_tweet(api: tweepy.API, last_game: datetime.datetime) -> bool:
             latest_tweet_date = created_at
 
     print(f"Last tweet was on {last_game.date()} and last game was on {latest_tweet_date.date()}")
-    return last_game.date() > latest_tweet_date.date()
+    return last_game.date() >= latest_tweet_date.date()
 
 
 
