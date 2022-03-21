@@ -309,6 +309,7 @@ def send_tweet(tweet_str: str, last_game: datetime.datetime) -> None:
     if should_send_tweet(api, last_game):
         if len(tweet_str) < 280:
             api.update_status(tweet_str)
+            print("Sent tweet")
     else:
         print("Already tweeted today")
 
@@ -339,9 +340,12 @@ def construct_tweet(lbj: int, kareem: int, malone: int, lebron_avg: float, sched
         else:
             tweet = "1. Kareem: {}\n2. LeBron: {} ({} points back)\n".format(kareem, lbj, kareem - lbj)
             games = math.ceil((kareem - lbj) / lebron_avg)
-            game = schedule[games - 1]
             tweet += f"LeBron needs about {games} more games to pass Kareem."
-            tweet += f"\nBest guess for passing Malone is {'at' if game[2] == '@' else 'against'} {game[3]} on {game[0]} at {game[1]}"
+            if games > len(schedule):
+                tweet += "\nBest guess for passing Kareem is next season."
+            else:
+                game = schedule[games - 1]
+                tweet += f"\nBest guess for passing Kareem is {'at' if game[2] == '@' else 'against'} {game[3]} on {game[0]} at {game[1]}"
 
     return tweet
 
